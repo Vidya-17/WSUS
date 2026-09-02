@@ -25,45 +25,45 @@
 # -----------------------------------------------------------------------------
 # PHASE 1 / STEP 1 — Install WSUS on Internet WSUS Server
 # -----------------------------------------------------------------------------
-- name: "Phase 1 / Step 1 - Install WSUS on Internet WSUS Server"
-  hosts: wsus_internet
-  gather_facts: yes
-  tasks:
+# - name: "Phase 1 / Step 1 - Install WSUS on Internet WSUS Server"
+#   hosts: wsus_internet
+#   gather_facts: yes
+#   tasks:
 
-    - name: Install WSUS role and sub-features
-      ansible.windows.win_feature:
-        name:
-          - UpdateServices
-          - UpdateServices-Services
-          - UpdateServices-DB
-          - UpdateServices-RSAT
-          - UpdateServices-API
-        include_management_tools: yes
-        state: present
-      register: wsus_feature_install
+#     - name: Install WSUS role and sub-features
+#       ansible.windows.win_feature:
+#         name:
+#           - UpdateServices
+#           - UpdateServices-Services
+#           - UpdateServices-DB
+#           - UpdateServices-RSAT
+#           - UpdateServices-API
+#         include_management_tools: yes
+#         state: present
+#       register: wsus_feature_install
 
-    - name: Reboot if required
-      ansible.windows.win_reboot:
-        reboot_timeout: 600
-      when: wsus_feature_install.reboot_required
+#     - name: Reboot if required
+#       ansible.windows.win_reboot:
+#         reboot_timeout: 600
+#       when: wsus_feature_install.reboot_required
 
-    - name: Ensure WSUS content storage directory exists
-      ansible.windows.win_file:
-        path: "{{ wsus_content_dir }}"
-        state: directory
+#     - name: Ensure WSUS content storage directory exists
+#       ansible.windows.win_file:
+#         path: "{{ wsus_content_dir }}"
+#         state: directory
 
-    - name: Run WSUS post-install configuration
-      ansible.windows.win_command: >
-        "{{ wsus_tools_dir }}\WsusUtil.exe" postinstall
-        CONTENT_DIR={{ wsus_content_dir }}
-      args:
-        creates: "{{ wsus_content_subdir }}"
+#     - name: Run WSUS post-install configuration
+#       ansible.windows.win_command: >
+#         "{{ wsus_tools_dir }}\WsusUtil.exe" postinstall
+#         CONTENT_DIR={{ wsus_content_dir }}
+#       args:
+#         creates: "{{ wsus_content_subdir }}"
 
-    - name: Ensure WsusService is running
-      ansible.windows.win_service:
-        name: WsusService
-        state: started
-        start_mode: auto
+#     - name: Ensure WsusService is running
+#       ansible.windows.win_service:
+#         name: WsusService
+#         state: started
+#         start_mode: auto
 
 # -----------------------------------------------------------------------------
 # PHASE 1 / STEP 2 — Synchronize updates from Microsoft
