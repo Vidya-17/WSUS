@@ -1,0 +1,307 @@
+---
+# =============================================================================
+# WSUS end-to-end automation: Internet WSUS (Server-1) -> export -> import ->
+# Air-gapped WSUS (Server-2)
+#
+# Requires: community.windows / ansible.windows collections on the control
+# node:
+#   ansible-galaxy collection install ansible.windows community.windows
+#
+# Run with:
+#   ansible-playbook -i inventory.ini site.yml --ask-vault-pass
+#
+# NOTE ON TRUE AIR-GAP RUNS:
+#   Play 3 ("bridge export to Server-2") only works if the control node can
+#   reach BOTH server1 and server2 over WinRM. If Server-2 sits in a network
+#   with zero route to the internet-side control node, skip Play 3, run
+#   Play 1+2 to produce the export files, move them across via your approved
+#   offline-media process, drop them on Server-2 at the paths in
+#   wsus_export_file/wsus_export_log, then run Play 4 with
+#   --limit wsus_airgapped -e "skip_bridge=true".
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PLAY 1 — Steps 1-4: Install + configure WSUS role on Server-1 (Internet WSUS)
+# -----------------------------------------------------------------------------
+- name: Install and configure Internet-facing WSUS (Server-1)
+  hosts: wsus_internet
+  gather_facts: yes
+  tasks:
+
+    - name: Step 1 - Install WSUS role and required sub-features
+      ansible.windows.win_feature:
+        name:
+          - UpdateServices
+          - UpdateServices-Services
+          - UpdateServices-DB          # remove if using a full SQL instance instead of WID
+          - UpdateServices-RSAT
+          - UpdateServices-API
+        include_management_tools: yes
+        state: present
+      register: wsus_feature_install
+
+    - name: Reboot if the feature install requires it
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+      when: wsus_feature_install.reboot_required
+
+    - name: Step 2 - Ensure WSUS content storage directory exists
+      ansible.windows.win_file:
+        path: "{{ wsus_content_dir }}"
+        state: directory
+
+    - name: Step 3 - Run WSUS post-install configuration
+      ansible.windows.win_command: >
+        "C:\Program Files\Update Services\Tools\WsusUtil.exe" postinstall
+        CONTENT_DIR={{ wsus_content_dir }}
+      args:
+        creates: "{{ wsus_content_dir }}\\WsusContent"   # idempotency guard
+      register: postinstall_result
+
+    - name: Ensure WsusService is running
+      ansible.windows.win_service:
+        name: WsusService
+        state: started
+        start_mode: auto
+
+    - name: Step 4 - Configure product/classification scope and run first sync
+      ansible.windows.win_shell: |
+        $wsus = Get-WsusServer -Name localhost -PortNumber 8530
+        $config = $wsus.GetConfiguration()
+        $config.OrderedRunOfDataProcessing = $true
+        $config.Save()
+
+        $subscription = $wsus.GetSubscription()
+
+        # Enable only the requested classifications
+        $allClassifications = $wsus.GetUpdateClassifications()
+        $wantedClassifications = $allClassifications | Where-Object {
+          {{ wsus_classifications | map('regex_replace', '^(.*)$', "'\1'") | join(', ') }} -contains $_.Title
+        }
+        $subscription.SetUpdateClassifications($wantedClassifications)
+
+        # Sync categories first so product list is populated, then select products
+        $subscription.StartSynchronizationForCategoryOnly()
+        while ($subscription.GetSynchronizationStatus() -ne 'NotProcessing') {
+          Start-Sleep -Seconds 10
+        }
+
+        $allProducts = $wsus.GetUpdateCategories()
+        $wantedProducts = $allProducts | Where-Object {
+          {{ wsus_products | map('regex_replace', '^(.*)$', "'\1'") | join(', ') }} -contains $_.Title
+        }
+        $subscription.SetUpdateCategories($wantedProducts)
+        $subscription.Save()
+
+        # Kick off the real first sync
+        $subscription.StartSynchronization()
+        Write-Output "Sync started"
+      register: sync_start_result
+
+    - name: Poll synchronization status until complete
+      ansible.windows.win_shell: |
+        $wsus = Get-WsusServer -Name localhost -PortNumber 8530
+        $wsus.GetSubscription().GetSynchronizationStatus()
+      register: sync_status
+      until: sync_status.stdout | trim == 'NotProcessing'
+      retries: 60          # 60 x 60s = up to 1 hour; raise for large first syncs
+      delay: 60
+
+    - name: Report last synchronization result
+      ansible.windows.win_shell: |
+        $wsus = Get-WsusServer -Name localhost -PortNumber 8530
+        $wsus.GetSubscription().GetSynchronizationHistory() | Select-Object -First 1 |
+          Select-Object StartTime, EndTime, Result, Error | Format-List | Out-String
+      register: sync_history
+
+    - name: Show sync result
+      ansible.builtin.debug:
+        var: sync_history.stdout
+
+    - name: Fail early if last sync did not succeed
+      ansible.builtin.fail:
+        msg: "Last WSUS sync did not succeed — check {{ wsus_content_dir }} and SoftwareDistribution.log before exporting."
+      when: "'Succeeded' not in sync_history.stdout"
+
+# -----------------------------------------------------------------------------
+# PLAY 2 — Steps 5-7: Export metadata from Server-1
+# -----------------------------------------------------------------------------
+- name: Export WSUS metadata from Server-1
+  hosts: wsus_internet
+  gather_facts: no
+  tasks:
+
+    - name: Step 5/6 - Confirm WsusUtil.exe is present
+      ansible.windows.win_stat:
+        path: "{{ wsus_tools_dir }}\\WsusUtil.exe"
+      register: wsusutil_stat
+
+    - name: Fail if WsusUtil.exe is missing
+      ansible.builtin.fail:
+        msg: "WsusUtil.exe not found at {{ wsus_tools_dir }} — check WSUS install path."
+      when: not wsusutil_stat.stat.exists
+
+    - name: Step 7 - Export update metadata
+      ansible.windows.win_command: >
+        "{{ wsus_tools_dir }}\WsusUtil.exe" export {{ wsus_export_file }} {{ wsus_export_log }}
+      register: export_result
+
+    - name: Show export output
+      ansible.builtin.debug:
+        var: export_result.stdout_lines
+
+    - name: Verify export file was created
+      ansible.windows.win_stat:
+        path: "{{ wsus_export_file }}"
+      register: export_file_stat
+
+    - name: Fail if export file wasn't produced
+      ansible.builtin.fail:
+        msg: "Export failed — {{ wsus_export_file }} was not created. Check {{ wsus_export_log }} on {{ inventory_hostname }}."
+      when: not export_file_stat.stat.exists
+
+# -----------------------------------------------------------------------------
+# PLAY 3 — Steps 8-9: Bridge the export files from Server-1 to the control
+# node, then push them to Server-2. ONLY runs when both hosts are reachable
+# from this control node. Skip this play entirely for a real air-gap and
+# transfer export.xml.gz / export.log via your approved offline-media process
+# instead.
+# -----------------------------------------------------------------------------
+- name: Fetch export files to control node
+  hosts: wsus_internet
+  gather_facts: no
+  vars:
+    skip_bridge: false
+  tasks:
+    - name: Ensure local staging directory exists
+      ansible.builtin.file:
+        path: "{{ local_staging_dir }}"
+        state: directory
+      delegate_to: localhost
+      run_once: true
+      when: not skip_bridge
+
+    - name: Fetch export.xml.gz from Server-1
+      ansible.builtin.fetch:
+        src: "{{ wsus_export_file }}"
+        dest: "{{ local_staging_dir }}/export.xml.gz"
+        flat: yes
+      when: not skip_bridge
+
+    - name: Fetch export.log from Server-1
+      ansible.builtin.fetch:
+        src: "{{ wsus_export_log }}"
+        dest: "{{ local_staging_dir }}/export.log"
+        flat: yes
+      when: not skip_bridge
+
+- name: Step 8/9 - Stage import files on Server-2
+  hosts: wsus_airgapped
+  gather_facts: no
+  vars:
+    skip_bridge: false
+  tasks:
+    - name: Step 8 - Ensure shared/staging folder exists on Server-2
+      ansible.windows.win_file:
+        path: "C:\\WSUSImport"
+        state: directory
+
+    - name: Step 9 - Copy export.xml.gz to Server-2
+      ansible.windows.win_copy:
+        src: "{{ local_staging_dir }}/export.xml.gz"
+        dest: "C:\\WSUSImport\\export.xml.gz"
+      when: not skip_bridge
+
+    - name: Step 9 - Copy export.log to Server-2
+      ansible.windows.win_copy:
+        src: "{{ local_staging_dir }}/export.log"
+        dest: "C:\\WSUSImport\\export.log"
+      when: not skip_bridge
+
+    # For the real air-gapped run: after moving files via USB/secure transfer,
+    # place them at C:\WSUSImport\ on Server-2 manually, then run this
+    # playbook against wsus_airgapped with -e "skip_bridge=true" to pick up
+    # from here.
+
+# -----------------------------------------------------------------------------
+# PLAY 4 — Steps 10-15: Install WSUS on Server-2 and import metadata
+# -----------------------------------------------------------------------------
+- name: Install WSUS on Server-2 (Air-gapped) and import metadata
+  hosts: wsus_airgapped
+  gather_facts: yes
+  tasks:
+
+    - name: Step 10 - Install WSUS role and required sub-features
+      ansible.windows.win_feature:
+        name:
+          - UpdateServices
+          - UpdateServices-Services
+          - UpdateServices-DB
+          - UpdateServices-RSAT
+          - UpdateServices-API
+        include_management_tools: yes
+        state: present
+      register: wsus_feature_install_2
+
+    - name: Reboot if the feature install requires it
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+      when: wsus_feature_install_2.reboot_required
+
+    - name: Step 11 - Ensure WSUS content storage directory exists
+      ansible.windows.win_file:
+        path: "{{ wsus_content_dir }}"
+        state: directory
+
+    - name: Step 12 - Run WSUS post-install configuration
+      ansible.windows.win_command: >
+        "C:\Program Files\Update Services\Tools\WsusUtil.exe" postinstall
+        CONTENT_DIR={{ wsus_content_dir }}
+      args:
+        creates: "{{ wsus_content_dir }}\\WsusContent"
+
+    - name: Ensure WsusService is running
+      ansible.windows.win_service:
+        name: WsusService
+        state: started
+        start_mode: auto
+
+    - name: Verify staged import files exist before importing
+      ansible.windows.win_stat:
+        path: "C:\\WSUSImport\\export.xml.gz"
+      register: import_file_stat
+
+    - name: Fail if import file is missing
+      ansible.builtin.fail:
+        msg: >
+          C:\WSUSImport\export.xml.gz not found on {{ inventory_hostname }}.
+          If this is a real air-gapped run, copy the export files across via
+          your approved offline-media process before re-running with
+          -e "skip_bridge=true".
+      when: not import_file_stat.stat.exists
+
+    - name: Step 13 - Import metadata
+      ansible.windows.win_command: >
+        "{{ wsus_tools_dir }}\WsusUtil.exe" import
+        C:\WSUSImport\export.xml.gz
+        {{ wsus_import_log }}
+      register: import_result
+
+    - name: Show import output
+      ansible.builtin.debug:
+        var: import_result.stdout_lines
+
+    - name: Step 15 - Verify imported metadata (spot-check update count)
+      ansible.windows.win_shell: |
+        $wsus = Get-WsusServer -Name localhost -PortNumber 8530
+        $wsus.GetUpdateCount()
+      register: imported_update_count
+
+    - name: Show imported update count
+      ansible.builtin.debug:
+        msg: "Server-2 now reports {{ imported_update_count.stdout | trim }} updates after import."
+
+    - name: Fail if no updates were imported
+      ansible.builtin.fail:
+        msg: "Import completed but 0 updates are present — check {{ wsus_import_log }} on {{ inventory_hostname }}."
+      when: (imported_update_count.stdout | trim | int) == 0
