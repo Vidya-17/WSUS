@@ -1,20 +1,29 @@
 ---
 wsus_content_dir: "C:\\WSUS"
+wsus_content_subdir: "C:\\WSUS\\WsusContent"
 wsus_tools_dir: "C:\\Program Files\\Update Services\\Tools"
 wsus_export_file: "C:\\export.xml.gz"
 wsus_export_log: "C:\\export.log"
 wsus_import_log: "C:\\import.log"
+wsus_port: 8530
 
-# Products/classifications to sync — narrow this to what you actually need.
-# A broad selection is the single biggest cause of slow/failing first syncs.
+# Products/classifications — keep this narrow. See the ongoing WSUS
+# catalog-metadata issue notes in README.md before assuming a full sync
+# will succeed cleanly; a narrow, known-good scope is far more likely to
+# import successfully.
 wsus_products:
   - "Windows Server 2022"
-  - "Windows Server 2019"
 wsus_classifications:
-  - "Critical Updates"
   - "Security Updates"
-  - "Definition Updates"
+  - "Critical Updates"
 
-# Local (control-node) staging dir for the fetched export files, used when
-# bridging between the two plays in the "jump host can reach both" pattern.
-local_staging_dir: "/tmp/wsus_export"
+# Local (control-node) staging dirs used when bridging Phase 1 -> Phase 2
+# in a single-control-node test lab. Not used in a real air-gap transfer.
+local_metadata_staging_dir: "/tmp/wsus_export"
+local_content_staging_dir: "/tmp/wsus_content"
+
+# Air-gapped WSUS server address, as clients will be pointed at it
+airgap_wsus_url: "http://10.10.10.10:8530"   # match wsus_airgapped host IP above
+
+# Computer target group updates are approved for
+approval_target_group: "All Computers"
