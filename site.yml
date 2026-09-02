@@ -354,9 +354,7 @@
         name:
           - UpdateServices
           - UpdateServices-Services
-          - UpdateServices-DB
           - UpdateServices-RSAT
-          - UpdateServices-API
         include_management_tools: yes
         state: present
       register: wsus_feature_install_2
