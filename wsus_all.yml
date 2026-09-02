@@ -1,0 +1,20 @@
+---
+wsus_content_dir: "C:\\WSUS"
+wsus_tools_dir: "C:\\Program Files\\Update Services\\Tools"
+wsus_export_file: "C:\\export.xml.gz"
+wsus_export_log: "C:\\export.log"
+wsus_import_log: "C:\\import.log"
+
+# Products/classifications to sync — narrow this to what you actually need.
+# A broad selection is the single biggest cause of slow/failing first syncs.
+wsus_products:
+  - "Windows Server 2022"
+  - "Windows Server 2019"
+wsus_classifications:
+  - "Critical Updates"
+  - "Security Updates"
+  - "Definition Updates"
+
+# Local (control-node) staging dir for the fetched export files, used when
+# bridging between the two plays in the "jump host can reach both" pattern.
+local_staging_dir: "/tmp/wsus_export"
