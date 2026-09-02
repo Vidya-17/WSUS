@@ -2,21 +2,31 @@
 server1 ansible_host=192.168.161.144
 
 [wsus_airgapped]
-server2 ansible_host=192.168.161.145
+server2 ansible_host=10.10.10.10          # replace with the air-gapped server's IP
+
+[airgap_clients]
+client1 ansible_host=10.10.10.20          # add one line per test client
 
 [wsus_all:children]
 wsus_internet
 wsus_airgapped
 
+[windows_all:children]
+wsus_all
+airgap_clients
+
 # ---------------------------------------------------------------------------
-# Common WinRM connection vars. Put real credentials in an ansible-vault
-# encrypted file instead of plain text (see group_vars/all/vault.yml note
-# at the bottom of site.yml).
+# Common WinRM connection vars.
+# IMPORTANT: airgap_clients and wsus_airgapped are, by definition, unreachable
+# from a control node that also reaches wsus_internet in a real deployment.
+# Run this playbook in two separate invocations against two separate control
+# nodes (or two ansible-playbook runs with --limit) once you move past
+# testing in a single connected lab. See README.md.
 # ---------------------------------------------------------------------------
-[wsus_all:vars]
+[windows_all:vars]
 ansible_connection=winrm
 ansible_winrm_transport=ntlm
 ansible_winrm_server_cert_validation=ignore
 ansible_port=5985
 ansible_user=Administrator
-# ansible_password should come from vault, not committed here
+# ansible_password should come from an ansible-vault file, not committed here
