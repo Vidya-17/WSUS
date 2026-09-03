@@ -557,7 +557,7 @@
 
     - name: Wait for scan to complete
       ansible.builtin.pause:
-        seconds: 300
+        minutes: 5
 
 # -----------------------------------------------------------------------------
 # PHASE 3 / STEP 15 — Verify client appears in WSUS console
@@ -575,6 +575,20 @@
     - name: Show registered clients
       ansible.builtin.debug:
         var: computer_targets.stdout_lines
+
+    - name: Check number of registered clients
+      ansible.windows.win_shell: |
+        (Get-WsusServer -Name localhost -PortNumber {{ wsus_port }}).GetComputerTargets().Count
+      register: registered_client_count
+
+    - name: Show registered client count
+      ansible.builtin.debug:
+        msg: "WSUS currently has {{ registered_client_count.stdout | trim }} registered client(s)"
+
+    - name: Fail if no clients are registered
+      ansible.builtin.fail:
+        msg: "No clients have registered with WSUS yet."
+      when: (registered_client_count.stdout | trim | int) == 0
 
 # -----------------------------------------------------------------------------
 # PHASE 3 / STEP 16 — Approve updates in Air-Gapped WSUS
