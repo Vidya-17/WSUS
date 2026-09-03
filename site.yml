@@ -557,7 +557,7 @@
 
     - name: Wait for scan to complete
       ansible.builtin.pause:
-        seconds: 60
+        seconds: 300
 
 # -----------------------------------------------------------------------------
 # PHASE 3 / STEP 15 — Verify client appears in WSUS console
